@@ -156,11 +156,54 @@ export default function TrackerPage() {
     return () => cancelAnimationFrame(animFrameRef.current);
   }, [step, lat, lon]);
 
-  // Get moon position
-  const moonPos = lat !== 0 ? SunCalc.getMoonPosition(new Date(), lat, lon) : null;
+  // Get sun position and arc
+  const now = new Date();
+  const sunPos = lat !== 0 ? SunCalc.getPosition(now, lat, lon) : null;
+  const sunAz = sunPos ? ((sunPos.azimuth * 180) / Math.PI + 180) % 360 : 0;
+  const sunAlt = sunPos ? (sunPos.altitude * 180) / Math.PI : 0;
+
+  // Compute sun arc points across the day (every 30 min)
+  const sunArc: { az: number; alt: number; hour: number }[] = [];
+  if (lat !== 0) {
+    const dayStart = new Date(now);
+    dayStart.setHours(0, 0, 0, 0);
+    for (let m = 0; m < 24 * 60; m += 30) {
+      const t = new Date(dayStart.getTime() + m * 60000);
+      const sp = SunCalc.getPosition(t, lat, lon);
+      const alt = (sp.altitude * 180) / Math.PI;
+      if (alt > -10) {
+        sunArc.push({
+          az: ((sp.azimuth * 180) / Math.PI + 180) % 360,
+          alt,
+          hour: t.getHours(),
+        });
+      }
+    }
+  }
+
+  // Get moon position and arc
+  const moonPos = lat !== 0 ? SunCalc.getMoonPosition(now, lat, lon) : null;
   const moonAz = moonPos ? ((moonPos.azimuth * 180) / Math.PI + 180) % 360 : 0;
   const moonAlt = moonPos ? (moonPos.altitude * 180) / Math.PI : 0;
-  const moonIllum = SunCalc.getMoonIllumination(new Date());
+  const moonIllum = SunCalc.getMoonIllumination(now);
+
+  // Compute moon arc (every 30 min)
+  const moonArc: { az: number; alt: number }[] = [];
+  if (lat !== 0) {
+    const dayStart = new Date(now);
+    dayStart.setHours(0, 0, 0, 0);
+    for (let m = 0; m < 24 * 60; m += 30) {
+      const t = new Date(dayStart.getTime() + m * 60000);
+      const mp = SunCalc.getMoonPosition(t, lat, lon);
+      const alt = (mp.altitude * 180) / Math.PI;
+      if (alt > -10) {
+        moonArc.push({
+          az: ((mp.azimuth * 180) / Math.PI + 180) % 360,
+          alt,
+        });
+      }
+    }
+  }
 
   // Currently active satellite passes
   const nowUTC = Math.floor(Date.now() / 1000);
@@ -269,6 +312,41 @@ export default function TrackerPage() {
 
       {/* AR overlay */}
       <div className="absolute inset-0">
+        {/* Horizon line */}
+        <HorizonLine cameraAz={pointing.azimuth} cameraAlt={pointing.altitude} />
+
+        {/* Sun arc (dashed golden line showing path across sky) */}
+        <ArcPath
+          points={sunArc}
+          cameraAz={pointing.azimuth}
+          cameraAlt={pointing.altitude}
+          color="#f5c542"
+          label="Sun"
+        />
+
+        {/* Moon arc (dashed silver line) */}
+        <ArcPath
+          points={moonArc}
+          cameraAz={pointing.azimuth}
+          cameraAlt={pointing.altitude}
+          color="#c4cee0"
+          label="Moon"
+        />
+
+        {/* Sun position */}
+        {sunPos && sunAlt > -10 && (
+          <ARObject
+            az={sunAz}
+            alt={sunAlt}
+            cameraAz={pointing.azimuth}
+            cameraAlt={pointing.altitude}
+            label={sunAlt > 0 ? `Sun ${Math.round(sunAlt)}°` : "Sun (below horizon)"}
+            color="#f5c542"
+            size={sunAlt > 0 ? 24 : 12}
+            type="moon"
+          />
+        )}
+
         {/* Moon */}
         {moonPos && moonAlt > -5 && (
           <ARObject
@@ -612,6 +690,126 @@ function cleanName(name: string): string {
 function compassDirection(az: number): string {
   const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
   return dirs[Math.round(az / 45) % 8];
+}
+
+function HorizonLine({ cameraAz, cameraAlt }: { cameraAz: number; cameraAlt: number }) {
+  // Project the horizon (alt=0) across the full azimuth range
+  const points: { x: number; y: number }[] = [];
+  for (let az = cameraAz - 40; az <= cameraAz + 40; az += 2) {
+    const pos = projectToScreen(((az % 360) + 360) % 360, 0, cameraAz, cameraAlt);
+    if (pos.y >= -0.1 && pos.y <= 1.1) {
+      points.push({ x: pos.x * 100, y: pos.y * 100 });
+    }
+  }
+
+  if (points.length < 2) return null;
+
+  const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+
+  // Cardinal direction labels along the horizon
+  const cardinals = [
+    { az: 0, label: "N" },
+    { az: 45, label: "NE" },
+    { az: 90, label: "E" },
+    { az: 135, label: "SE" },
+    { az: 180, label: "S" },
+    { az: 225, label: "SW" },
+    { az: 270, label: "W" },
+    { az: 315, label: "NW" },
+  ];
+
+  return (
+    <>
+      <svg className="absolute inset-0 w-full h-full pointer-events-none">
+        <path d={pathD} fill="none" stroke="#ffffff" strokeWidth="0.5" opacity="0.3" />
+      </svg>
+      {cardinals.map(({ az, label }) => {
+        const pos = projectToScreen(az, 0, cameraAz, cameraAlt);
+        if (!pos.visible) return null;
+        return (
+          <div
+            key={label}
+            className="absolute pointer-events-none"
+            style={{
+              left: `${pos.x * 100}%`,
+              top: `${pos.y * 100}%`,
+              transform: "translate(-50%, -50%)",
+            }}
+          >
+            <span
+              className="text-[10px] font-medium tracking-wider"
+              style={{
+                color: label === "N" ? "#ef4444" : "#ffffff80",
+                textShadow: "0 1px 3px rgba(0,0,0,0.9)",
+              }}
+            >
+              {label}
+            </span>
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
+function ArcPath({
+  points,
+  cameraAz,
+  cameraAlt,
+  color,
+  label,
+}: {
+  points: { az: number; alt: number }[];
+  cameraAz: number;
+  cameraAlt: number;
+  color: string;
+  label: string;
+}) {
+  const projected: { x: number; y: number }[] = [];
+  for (const p of points) {
+    const pos = projectToScreen(p.az, p.alt, cameraAz, cameraAlt);
+    if (pos.visible) {
+      projected.push({ x: pos.x * 100, y: pos.y * 100 });
+    }
+  }
+
+  if (projected.length < 2) return null;
+
+  // Filter out big jumps (wrapping artifacts)
+  const segments: { x: number; y: number }[][] = [[]];
+  for (let i = 0; i < projected.length; i++) {
+    const current = segments[segments.length - 1];
+    if (current.length > 0) {
+      const prev = current[current.length - 1];
+      const dx = projected[i].x - prev.x;
+      const dy = projected[i].y - prev.y;
+      if (Math.sqrt(dx * dx + dy * dy) > 30) {
+        segments.push([]);
+      }
+    }
+    segments[segments.length - 1].push(projected[i]);
+  }
+
+  return (
+    <svg className="absolute inset-0 w-full h-full pointer-events-none">
+      {segments
+        .filter((seg) => seg.length >= 2)
+        .map((seg, i) => {
+          const d = seg.map((p, j) => `${j === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
+          return (
+            <path
+              key={i}
+              d={d}
+              fill="none"
+              stroke={color}
+              strokeWidth="1"
+              strokeDasharray="6 4"
+              opacity="0.35"
+            />
+          );
+        })}
+    </svg>
+  );
 }
 
 function StepRow({ label, status }: { label: string; status: "pending" | "active" | "done" }) {
