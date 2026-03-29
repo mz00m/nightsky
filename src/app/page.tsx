@@ -2,28 +2,76 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { SkyData, Location } from "@/lib/types";
+import { SatellitePass } from "@/lib/satellites";
 import { calculateSkyData } from "@/lib/astronomy";
 import { StarField } from "@/components/StarField";
 import { MoonPhase } from "@/components/MoonPhase";
 import { BortleScale } from "@/components/BortleScale";
 import { SkyHighlights } from "@/components/SkyHighlights";
 import { PlanetList } from "@/components/PlanetList";
+import { SatellitePasses } from "@/components/SatellitePasses";
+import { OverheadNow } from "@/components/OverheadNow";
+
+interface OverheadData {
+  bright: { satid: number; satname: string; satlat: number; satlng: number; satalt: number }[];
+  rocketBodies: { satid: number; satname: string; satlat: number; satlng: number; satalt: number }[];
+  debris: { satid: number; satname: string; satlat: number; satlng: number; satalt: number }[];
+}
 
 export default function Home() {
   const [skyData, setSkyData] = useState<SkyData | null>(null);
+  const [passes, setPasses] = useState<SatellitePass[]>([]);
+  const [overhead, setOverhead] = useState<OverheadData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [satLoading, setSatLoading] = useState(true);
+  const [overheadLoading, setOverheadLoading] = useState(true);
+  const [satError, setSatError] = useState<string | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
 
   const loadSkyData = useCallback((location: Location) => {
     const data = calculateSkyData(location, new Date());
     setSkyData(data);
     setLoading(false);
+
+    // Fetch satellite passes
+    fetch(
+      `/api/satellites?lat=${location.latitude}&lng=${location.longitude}&alt=0&mode=passes`
+    )
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.error && data.passes?.length === 0) {
+          setSatError(
+            "Satellite tracking requires an N2YO API key. Add N2YO_API_KEY to your environment."
+          );
+        } else {
+          setPasses(data.passes || []);
+        }
+        setSatLoading(false);
+      })
+      .catch(() => {
+        setSatError("Could not load satellite data");
+        setSatLoading(false);
+      });
+
+    // Fetch what's overhead now
+    fetch(
+      `/api/satellites?lat=${location.latitude}&lng=${location.longitude}&alt=0&mode=above`
+    )
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.above) {
+          setOverhead(data.above);
+        }
+        setOverheadLoading(false);
+      })
+      .catch(() => {
+        setOverheadLoading(false);
+      });
   }, []);
 
   useEffect(() => {
     if (!navigator.geolocation) {
-      setLocationError("Geolocation is not supported by your browser.");
-      // Fall back to a default location (NYC)
+      setLocationError("Geolocation not supported. Showing New York.");
       loadSkyData({ latitude: 40.71, longitude: -74.01 });
       return;
     }
@@ -36,7 +84,7 @@ export default function Home() {
         });
       },
       () => {
-        setLocationError("Location access denied. Showing New York as default.");
+        setLocationError("Location access denied. Showing New York.");
         loadSkyData({ latitude: 40.71, longitude: -74.01 });
       },
       { timeout: 10000, maximumAge: 300000 }
@@ -55,7 +103,7 @@ export default function Home() {
             Finding your sky...
           </p>
           <p className="text-sm text-text-dim mt-3">
-            Calculating what&apos;s visible from your location
+            Calculating what&apos;s overhead from your location
           </p>
         </div>
       </div>
@@ -120,13 +168,39 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Top highlight — what to see first */}
+        {/* === OVERHEAD RIGHT NOW === */}
+        <section className="mb-12 animate-fade-in-delay-1">
+          <h2
+            className="text-xs uppercase tracking-wider text-text-dim mb-4"
+          >
+            Overhead right now
+          </h2>
+          <OverheadNow data={overhead} loading={overheadLoading} />
+        </section>
+
+        {/* === UPCOMING PASSES — the main event === */}
+        <section className="mb-12 animate-fade-in-delay-2">
+          <div className="flex items-baseline justify-between mb-4">
+            <h2 className="text-xs uppercase tracking-wider text-text-dim">
+              Upcoming visible passes
+            </h2>
+            <span className="text-[10px] text-text-dim">Next 5 days</span>
+          </div>
+          <SatellitePasses
+            passes={passes}
+            loading={satLoading}
+            error={satError}
+          />
+        </section>
+
+        {/* Divider */}
+        <div className="border-t border-border/30 my-12" />
+
+        {/* === SKY HIGHLIGHTS === */}
         {skyData.highlights.length > 0 && (
-          <section className="mb-12 animate-fade-in-delay-1">
-            <h2
-              className="text-xs uppercase tracking-wider text-text-dim mb-4"
-            >
-              Best tonight
+          <section className="mb-12 animate-fade-in-delay-2">
+            <h2 className="text-xs uppercase tracking-wider text-text-dim mb-4">
+              Also worth seeing
             </h2>
             <SkyHighlights
               highlights={skyData.highlights}
@@ -135,10 +209,9 @@ export default function Home() {
           </section>
         )}
 
-        {/* Two-column: Moon + Planets */}
+        {/* Moon + Planets */}
         <div className="grid md:grid-cols-2 gap-8 mb-12">
-          {/* Moon */}
-          <section className="animate-fade-in-delay-2">
+          <section className="animate-fade-in-delay-3">
             <h2 className="text-xs uppercase tracking-wider text-text-dim mb-4">
               Moon
             </h2>
@@ -171,8 +244,7 @@ export default function Home() {
             </div>
           </section>
 
-          {/* Planets */}
-          <section className="animate-fade-in-delay-2">
+          <section className="animate-fade-in-delay-3">
             <h2 className="text-xs uppercase tracking-wider text-text-dim mb-4">
               Planets
             </h2>
@@ -236,8 +308,8 @@ export default function Home() {
         {/* Footer */}
         <footer className="text-center text-xs text-text-dim py-8 border-t border-border/30">
           <p>
-            Calculations use your device&apos;s location and time. Planet positions
-            are approximate. For precise observations, consult a planetarium app.
+            Satellite data from N2YO. Sky calculations use your device&apos;s
+            location and time. Planet positions are approximate.
           </p>
         </footer>
       </main>
