@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@theme {
+  --color-midnight: #0a0e1a;
+  --color-deep: #0f1628;
+  --color-surface: #151d33;
+  --color-surface-light: #1c2644;
+  --color-border: #243052;
+  --color-text-primary: #e8eaf0;
+  --color-text-secondary: #8892ab;
+  --color-text-dim: #5a6580;
+  --color-accent-gold: #f5c542;
+  --color-accent-blue: #5b8def;
+  --color-accent-silver: #c4cee0;
+  --color-planet-mercury: #b5a78a;
+  --color-planet-venus: #f5e6c8;
+  --color-planet-mars: #e07a5f;
+  --color-planet-jupiter: #d4a574;
+  --color-planet-saturn: #e8d5a3;
+  --font-display: "Georgia", "Times New Roman", serif;
+  --font-body: "system-ui", "-apple-system", "Segoe UI", sans-serif;
+  --font-mono: "SF Mono", "Menlo", "Monaco", monospace;
+}
+
+html {
+  background-color: var(--color-midnight);
+  color: var(--color-text-primary);
+}
+
+body {
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Subtle star shimmer */
+@keyframes twinkle {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.6s ease-out forwards;
+}
+
+.animate-fade-in-delay-1 {
+  animation: fade-in 0.6s ease-out 0.1s forwards;
+  opacity: 0;
+}
+
+.animate-fade-in-delay-2 {
+  animation: fade-in 0.6s ease-out 0.2s forwards;
+  opacity: 0;
+}
+
+.animate-fade-in-delay-3 {
+  animation: fade-in 0.6s ease-out 0.3s forwards;
+  opacity: 0;
+}
+
+/* Moon phase rendering */
+.moon-shadow {
+  transition: all 0.3s ease;
+}
+
+/* Bortle scale bar */
+.bortle-bar {
+  background: linear-gradient(
+    to right,
+    #0a0e1a 0%,
+    #1a1f3a 20%,
+    #2d3555 35%,
+    #4a5070 50%,
+    #6b7090 65%,
+    #8a8fa5 75%,
+    #b0b5c5 85%,
+    #d5d8e0 95%,
+    #ffffff 100%
+  );
+}
