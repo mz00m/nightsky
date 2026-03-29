@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState } from "react";
 import SunCalc from "suncalc";
 import { SatellitePass } from "@/lib/satellites";
 import {
@@ -40,8 +40,47 @@ export default function TrackerPage() {
   const animFrameRef = useRef<number>(0);
 
   // Request permissions and start camera
-  const init = useCallback(async () => {
-    // 1. Camera
+  // IMPORTANT: This must be a regular async function called directly from onClick,
+  // NOT wrapped in useCallback. iOS Safari requires DeviceOrientationEvent.requestPermission()
+  // to be in the synchronous call chain of a user gesture (tap).
+  async function init() {
+    // 1. Request orientation FIRST — must happen in the direct tap handler chain on iOS.
+    // Any awaited promise before this breaks the user gesture chain.
+    const needsOrientationPermission =
+      typeof DeviceOrientationEvent !== "undefined" &&
+      typeof (DeviceOrientationEvent as unknown as { requestPermission?: unknown }).requestPermission === "function";
+
+    if (needsOrientationPermission) {
+      try {
+        const permission = await (
+          DeviceOrientationEvent as unknown as {
+            requestPermission: () => Promise<string>;
+          }
+        ).requestPermission();
+        if (permission !== "granted") {
+          setState((s) => ({
+            ...s,
+            error:
+              "Motion access denied. Go to Settings → Safari → Motion & Orientation Access and enable it, then reload.",
+          }));
+          return;
+        }
+      } catch (e) {
+        setState((s) => ({
+          ...s,
+          error:
+            "Motion permission failed. Make sure Settings → Safari → Motion & Orientation Access is enabled, then reload this page.",
+        }));
+        return;
+      }
+    }
+
+    // Attach orientation listeners immediately after permission
+    window.addEventListener("deviceorientationabsolute", handleOrientation, true);
+    window.addEventListener("deviceorientation", handleOrientation, true);
+    setState((s) => ({ ...s, orientationReady: true }));
+
+    // 2. Camera — safe to await now, orientation permission is already secured
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -59,38 +98,6 @@ export default function TrackerPage() {
       }));
       return;
     }
-
-    // 2. Device orientation
-    if (
-      typeof DeviceOrientationEvent !== "undefined" &&
-      "requestPermission" in DeviceOrientationEvent
-    ) {
-      // iOS requires explicit permission
-      try {
-        const permission = await (
-          DeviceOrientationEvent as unknown as {
-            requestPermission: () => Promise<string>;
-          }
-        ).requestPermission();
-        if (permission !== "granted") {
-          setState((s) => ({
-            ...s,
-            error: "Orientation access needed. Please allow motion permissions.",
-          }));
-          return;
-        }
-      } catch {
-        setState((s) => ({
-          ...s,
-          error: "Could not request orientation permission.",
-        }));
-        return;
-      }
-    }
-
-    window.addEventListener("deviceorientationabsolute", handleOrientation, true);
-    window.addEventListener("deviceorientation", handleOrientation, true);
-    setState((s) => ({ ...s, orientationReady: true }));
 
     // 3. Location
     navigator.geolocation.getCurrentPosition(
@@ -121,7 +128,7 @@ export default function TrackerPage() {
       },
       { timeout: 10000 }
     );
-  }, []);
+  }
 
   function handleOrientation(event: DeviceOrientationEvent) {
     // Use webkitCompassHeading for iOS, alpha for others
