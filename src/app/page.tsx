@@ -11,6 +11,7 @@ import { SkyHighlights } from "@/components/SkyHighlights";
 import { PlanetList } from "@/components/PlanetList";
 import { SatellitePasses } from "@/components/SatellitePasses";
 import { OverheadNow } from "@/components/OverheadNow";
+import { LocationSearch } from "@/components/LocationSearch";
 
 interface OverheadData {
   bright: { satid: number; satname: string; satlat: number; satlng: number; satalt: number }[];
@@ -133,13 +134,19 @@ export default function Home() {
             Tonight&apos;s Sky
           </h1>
           <div className="mt-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm text-text-secondary">
-            <span>{skyData.location.name}</span>
+            <LocationSearch
+              onSelect={(loc) => {
+                setLoading(false);
+                setSatLoading(true);
+                setOverheadLoading(true);
+                setSatError(null);
+                loadSkyData(loc);
+              }}
+              currentName={skyData.location.name}
+            />
             <span className="text-text-dim">·</span>
             <span>{dateStr}</span>
           </div>
-          {locationError && (
-            <p className="text-xs text-text-dim mt-2">{locationError}</p>
-          )}
         </header>
 
         {/* Sun times strip */}
