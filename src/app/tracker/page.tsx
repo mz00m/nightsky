@@ -506,23 +506,41 @@ function ARObject({
           />
         )}
 
-        {/* Label */}
-        {(type !== "star" || pos.distance < 15) && (
+        {/* Label — always visible */}
+        <div
+          className="absolute whitespace-nowrap flex flex-col items-center"
+          style={{
+            top: size + 2,
+            left: "50%",
+            transform: "translateX(-50%)",
+          }}
+        >
+          {/* Type badge */}
+          {type !== "star" && (
+            <span
+              className="text-[8px] uppercase tracking-wider px-1 py-0.5 rounded mb-0.5"
+              style={{
+                color: "#fff",
+                backgroundColor: `${color}60`,
+                textShadow: "0 1px 2px rgba(0,0,0,0.9)",
+              }}
+            >
+              {type === "moon" ? "Moon" : type === "satellite" ? "Satellite" : type === "upcoming" ? "Soon" : ""}
+            </span>
+          )}
           <p
-            className="absolute whitespace-nowrap text-center"
+            className="text-center"
             style={{
-              top: size + 4,
-              left: "50%",
-              transform: "translateX(-50%)",
-              fontSize: type === "star" ? "9px" : "11px",
-              color: type === "star" ? `${color}cc` : color,
-              textShadow: "0 1px 3px rgba(0,0,0,0.8)",
-              fontWeight: type === "satellite" ? 600 : 400,
+              fontSize: type === "star" ? "10px" : "12px",
+              color: color,
+              textShadow: "0 1px 4px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.7)",
+              fontWeight: type === "star" ? 500 : 600,
+              letterSpacing: type === "star" ? "0.02em" : undefined,
             }}
           >
             {label}
           </p>
-        )}
+        </div>
       </div>
     </>
   );
