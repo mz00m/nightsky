@@ -12,22 +12,14 @@ import {
   SkyObject,
 } from "@/lib/ar-math";
 
-interface TrackerState {
-  cameraReady: boolean;
-  orientationReady: boolean;
-  locationReady: boolean;
-  error: string | null;
-}
+type InitStep = "idle" | "orientation" | "camera" | "location" | "ready";
 
 export default function TrackerPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [state, setState] = useState<TrackerState>({
-    cameraReady: false,
-    orientationReady: false,
-    locationReady: false,
-    error: null,
-  });
+  const streamRef = useRef<MediaStream | null>(null);
+  const [step, setStep] = useState<InitStep>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [cameraReady, setCameraReady] = useState(false);
   const [pointing, setPointing] = useState<CameraPointing>({
     azimuth: 0,
     altitude: 0,
@@ -39,13 +31,23 @@ export default function TrackerPage() {
   const orientationRef = useRef({ alpha: 0, beta: 0, gamma: 0 });
   const animFrameRef = useRef<number>(0);
 
-  // Request permissions and start camera
-  // IMPORTANT: This must be a regular async function called directly from onClick,
-  // NOT wrapped in useCallback. iOS Safari requires DeviceOrientationEvent.requestPermission()
-  // to be in the synchronous call chain of a user gesture (tap).
+  // Attach stream to video element once both exist
+  useEffect(() => {
+    if (streamRef.current && videoRef.current && !videoRef.current.srcObject) {
+      videoRef.current.srcObject = streamRef.current;
+      videoRef.current.play().then(() => {
+        setCameraReady(true);
+      }).catch(() => {
+        setError("Could not start camera playback.");
+      });
+    }
+  }, [step]); // re-check when step changes and video element may now exist
+
+  // Step-by-step init — each permission is its own phase with visible feedback.
+  // Orientation MUST be first and called synchronously from the tap gesture.
   async function init() {
-    // 1. Request orientation FIRST — must happen in the direct tap handler chain on iOS.
-    // Any awaited promise before this breaks the user gesture chain.
+    // Step 1: Orientation (must be first for iOS gesture chain)
+    setStep("orientation");
     const needsOrientationPermission =
       typeof DeviceOrientationEvent !== "undefined" &&
       typeof (DeviceOrientationEvent as unknown as { requestPermission?: unknown }).requestPermission === "function";
@@ -58,76 +60,55 @@ export default function TrackerPage() {
           }
         ).requestPermission();
         if (permission !== "granted") {
-          setState((s) => ({
-            ...s,
-            error:
-              "Motion access denied. Go to Settings → Safari → Motion & Orientation Access and enable it, then reload.",
-          }));
+          setError("Motion access denied. Go to Settings → Safari → Motion & Orientation Access, then reload.");
           return;
         }
-      } catch (e) {
-        setState((s) => ({
-          ...s,
-          error:
-            "Motion permission failed. Make sure Settings → Safari → Motion & Orientation Access is enabled, then reload this page.",
-        }));
+      } catch {
+        // iOS may throw if the feature is disabled at OS level
+        setError("Motion sensors unavailable. Check Settings → Safari → Motion & Orientation Access.");
         return;
       }
     }
 
-    // Attach orientation listeners immediately after permission
     window.addEventListener("deviceorientationabsolute", handleOrientation, true);
     window.addEventListener("deviceorientation", handleOrientation, true);
-    setState((s) => ({ ...s, orientationReady: true }));
 
-    // 2. Camera — safe to await now, orientation permission is already secured
+    // Step 2: Camera
+    setStep("camera");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { facingMode: "environment", width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false,
       });
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-        setState((s) => ({ ...s, cameraReady: true }));
-      }
+      streamRef.current = stream;
     } catch {
-      setState((s) => ({
-        ...s,
-        error: "Camera access needed for AR tracking. Please allow camera permissions.",
-      }));
+      setError("Camera access denied. Allow camera permissions and reload.");
       return;
     }
 
-    // 3. Location
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const { latitude, longitude } = pos.coords;
-        setLat(latitude);
-        setLon(longitude);
-        setState((s) => ({ ...s, locationReady: true }));
+    // Step 3: Location
+    setStep("location");
+    try {
+      const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000 });
+      });
+      const { latitude, longitude } = pos.coords;
+      setLat(latitude);
+      setLon(longitude);
+      setSkyObjects(getStarPositions(latitude, longitude, new Date()));
 
-        // Load star positions
-        setSkyObjects(getStarPositions(latitude, longitude, new Date()));
+      // Fetch satellite passes (non-blocking)
+      fetch(`/api/satellites?lat=${latitude}&lng=${longitude}&alt=0&mode=passes`)
+        .then((r) => r.json())
+        .then((data) => { if (data.passes) setPasses(data.passes); })
+        .catch(() => {});
+    } catch {
+      setError("Location access denied. Allow location permissions and reload.");
+      return;
+    }
 
-        // Fetch satellite passes
-        fetch(
-          `/api/satellites?lat=${latitude}&lng=${longitude}&alt=0&mode=passes`
-        )
-          .then((r) => r.json())
-          .then((data) => {
-            if (data.passes) setPasses(data.passes);
-          })
-          .catch(() => {});
-      },
-      () => {
-        setState((s) => ({
-          ...s,
-          error: "Location needed for sky tracking. Please allow location access.",
-        }));
-      },
-      { timeout: 10000 }
-    );
+    // Done — switch to AR view
+    setStep("ready");
   }
 
   function handleOrientation(event: DeviceOrientationEvent) {
@@ -146,7 +127,7 @@ export default function TrackerPage() {
 
   // Animation loop
   useEffect(() => {
-    if (!state.cameraReady || !state.orientationReady) return;
+    if (step !== "ready") return;
 
     const loop = () => {
       const { alpha, beta, gamma } = orientationRef.current;
@@ -173,7 +154,7 @@ export default function TrackerPage() {
 
     animFrameRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [state.cameraReady, state.orientationReady, lat, lon]);
+  }, [step, lat, lon]);
 
   // Get moon position
   const moonPos = lat !== 0 ? SunCalc.getMoonPosition(new Date(), lat, lon) : null;
@@ -190,8 +171,16 @@ export default function TrackerPage() {
     .filter((p) => p.startUTC > nowUTC && p.startUTC - nowUTC < 7200)
     .slice(0, 3);
 
-  // Setup screen
-  if (!state.cameraReady && !state.error) {
+  // Setup / loading / error screens
+  if (step !== "ready") {
+    const stepLabels: Record<InitStep, string> = {
+      idle: "",
+      orientation: "Requesting motion sensors…",
+      camera: "Requesting camera…",
+      location: "Getting your location…",
+      ready: "",
+    };
+
     return (
       <div className="fixed inset-0 bg-midnight flex items-center justify-center">
         <div className="text-center p-8 max-w-sm">
@@ -201,44 +190,62 @@ export default function TrackerPage() {
           >
             Sky Tracker
           </h1>
-          <p className="text-sm text-text-secondary mb-8 leading-relaxed">
-            Point your phone at the sky to see satellites, planets, and stars
-            overlaid on your camera view.
-          </p>
-          <button
-            onClick={init}
-            className="px-6 py-3 bg-accent-blue text-white rounded-lg text-sm font-medium hover:bg-accent-blue/90 transition-colors"
-          >
-            Start tracking
-          </button>
-          <p className="text-xs text-text-dim mt-4">
-            Requires camera, motion sensors, and location
-          </p>
+
+          {error ? (
+            <>
+              <p className="text-text-secondary mb-6 text-sm leading-relaxed">{error}</p>
+              <button
+                onClick={() => window.location.reload()}
+                className="px-5 py-2.5 bg-surface border border-border rounded-lg text-sm text-text-primary"
+              >
+                Try again
+              </button>
+            </>
+          ) : step === "idle" ? (
+            <>
+              <p className="text-sm text-text-secondary mb-8 leading-relaxed">
+                Point your phone at the sky to see satellites, planets, and stars
+                overlaid on your camera view.
+              </p>
+              <button
+                onClick={init}
+                className="px-6 py-3 bg-accent-blue text-white rounded-lg text-sm font-medium hover:bg-accent-blue/90 transition-colors"
+              >
+                Start tracking
+              </button>
+              <p className="text-xs text-text-dim mt-4">
+                Requires camera, motion sensors, and location
+              </p>
+            </>
+          ) : (
+            <>
+              {/* Step progress */}
+              <div className="space-y-3 text-left mb-6">
+                <StepRow
+                  label="Motion sensors"
+                  status={step === "orientation" ? "active" : "done"}
+                />
+                <StepRow
+                  label="Camera"
+                  status={step === "camera" ? "active" : step === "orientation" ? "pending" : "done"}
+                />
+                <StepRow
+                  label="Location"
+                  status={step === "location" ? "active" : step === "orientation" || step === "camera" ? "pending" : "done"}
+                />
+              </div>
+              <p className="text-sm text-text-secondary animate-pulse">
+                {stepLabels[step]}
+              </p>
+              <p className="text-xs text-text-dim mt-3">
+                Tap &ldquo;Allow&rdquo; on each prompt
+              </p>
+            </>
+          )}
+
           <a
             href="/"
             className="inline-block mt-6 text-sm text-text-dim hover:text-text-secondary transition-colors"
-          >
-            ← Back to sky guide
-          </a>
-        </div>
-      </div>
-    );
-  }
-
-  if (state.error) {
-    return (
-      <div className="fixed inset-0 bg-midnight flex items-center justify-center">
-        <div className="text-center p-8 max-w-sm">
-          <p className="text-text-secondary mb-4">{state.error}</p>
-          <button
-            onClick={() => window.location.reload()}
-            className="px-4 py-2 bg-surface border border-border rounded-lg text-sm text-text-primary"
-          >
-            Try again
-          </button>
-          <a
-            href="/"
-            className="block mt-4 text-sm text-text-dim hover:text-text-secondary"
           >
             ← Back to sky guide
           </a>
@@ -587,4 +594,21 @@ function cleanName(name: string): string {
 function compassDirection(az: number): string {
   const dirs = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
   return dirs[Math.round(az / 45) % 8];
+}
+
+function StepRow({ label, status }: { label: string; status: "pending" | "active" | "done" }) {
+  return (
+    <div className="flex items-center gap-3">
+      {status === "done" ? (
+        <span className="text-green-400 text-sm">✓</span>
+      ) : status === "active" ? (
+        <span className="w-3 h-3 rounded-full border-2 border-accent-blue border-t-transparent animate-spin" />
+      ) : (
+        <span className="w-3 h-3 rounded-full border border-border" />
+      )}
+      <span className={status === "pending" ? "text-text-dim text-sm" : status === "active" ? "text-text-primary text-sm" : "text-text-secondary text-sm"}>
+        {label}
+      </span>
+    </div>
+  );
 }
