@@ -149,6 +149,25 @@ export default function Home() {
           </div>
         </header>
 
+        {/* AR Tracker link */}
+        <div className="mb-10 animate-fade-in-delay-1">
+          <a
+            href="/tracker"
+            className="group flex items-center gap-3 p-4 rounded-lg border border-accent-blue/30 bg-accent-blue/5 hover:bg-accent-blue/10 transition-colors"
+          >
+            <span className="text-2xl">📱</span>
+            <div>
+              <p className="text-sm text-text-primary font-medium group-hover:text-accent-blue transition-colors">
+                Open Sky Tracker
+              </p>
+              <p className="text-xs text-text-dim mt-0.5">
+                Point your phone at the sky to identify satellites, planets, and stars in AR
+              </p>
+            </div>
+            <span className="ml-auto text-text-dim group-hover:text-accent-blue transition-colors">→</span>
+          </a>
+        </div>
+
         {/* Sun times strip */}
         <div className="mb-10 animate-fade-in-delay-1">
           <div className="flex gap-6 text-sm">
