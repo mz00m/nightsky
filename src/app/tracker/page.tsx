@@ -24,7 +24,7 @@ export default function TrackerPage() {
   // Use refs for high-frequency data, state only for render ticks
   const pointingRef = useRef<CameraPointing>({ azimuth: 0, altitude: 0 });
   const [renderTick, setRenderTick] = useState(0);
-  const smootherRef = useRef(new OrientationSmoother(0.82));
+  const smootherRef = useRef(new OrientationSmoother(0.88));
 
   const [lat, setLat] = useState(0);
   const [lon, setLon] = useState(0);
@@ -32,6 +32,11 @@ export default function TrackerPage() {
   const [skyObjects, setSkyObjects] = useState<SkyObject[]>([]);
   const animFrameRef = useRef<number>(0);
   const lastRenderRef = useRef(0);
+
+  // Calibration: offset between computed and actual sky positions
+  const calibrationRef = useRef<{ azOffset: number; altOffset: number }>({ azOffset: 0, altOffset: 0 });
+  const [calibrated, setCalibrated] = useState(false);
+  const [showCalibrate, setShowCalibrate] = useState(false);
 
   // Attach stream to video element once both exist
   useEffect(() => {
@@ -170,6 +175,46 @@ export default function TrackerPage() {
 
   // Read pointing from ref (updated by animation loop)
   const pointing = pointingRef.current;
+
+  // Apply calibration offset to camera pointing for all projections
+  const calibratedAz = ((pointing.azimuth + calibrationRef.current.azOffset) % 360 + 360) % 360;
+  const calibratedAlt = pointing.altitude + calibrationRef.current.altOffset;
+
+  // Tap-to-calibrate: user taps the real sun on screen, we compute the offset
+  function handleCalibrateTap(screenX: number, screenY: number) {
+    if (!showCalibrate || lat === 0) return;
+
+    const now = new Date();
+    const sp = SunCalc.getPosition(now, lat, lon);
+    const trueSunAz = ((sp.azimuth * 180) / Math.PI + 180) % 360;
+    const trueSunAlt = (sp.altitude * 180) / Math.PI;
+
+    if (trueSunAlt < 2) return; // sun too low to calibrate reliably
+
+    // Where the user tapped (0-1)
+    const tapX = screenX / window.innerWidth;
+    const tapY = screenY / window.innerHeight;
+
+    // Reverse project: screen position → sky position relative to camera
+    const fovH = 65;
+    const fovV = 95;
+    const tapAzOffset = (tapX - 0.5) * fovH;
+    const tapAltOffset = (0.5 - tapY) * fovV;
+
+    // The tap point's sky position = camera pointing + offset from center
+    const tapSkyAz = ((pointing.azimuth + tapAzOffset) % 360 + 360) % 360;
+    const tapSkyAlt = pointing.altitude + tapAltOffset;
+
+    // Calibration offset = difference between true sun position and where gyro says the tap was
+    let azDiff = trueSunAz - tapSkyAz;
+    if (azDiff > 180) azDiff -= 360;
+    if (azDiff < -180) azDiff += 360;
+    const altDiff = trueSunAlt - tapSkyAlt;
+
+    calibrationRef.current = { azOffset: azDiff, altOffset: altDiff };
+    setCalibrated(true);
+    setShowCalibrate(false);
+  }
 
   // Sun data
   const now = new Date();
@@ -310,24 +355,26 @@ export default function TrackerPage() {
       {/* Dark overlay */}
       <div className="absolute inset-0 bg-black/20" />
 
-      {/* AR overlay */}
-      <div className="absolute inset-0">
+      {/* AR overlay — tap to calibrate when in calibration mode */}
+      <div className="absolute inset-0"
+        onClick={showCalibrate ? (e) => handleCalibrateTap(e.clientX, e.clientY) : undefined}
+      >
         {/* Horizon line */}
-        <HorizonLine cameraAz={pointing.azimuth} cameraAlt={pointing.altitude} />
+        <HorizonLine cameraAz={calibratedAz} cameraAlt={calibratedAlt} />
 
         {/* Sun arc */}
-        <ArcPath points={sunArc} cameraAz={pointing.azimuth} cameraAlt={pointing.altitude} color="#f5c542" strokeWidth={1.5} />
+        <ArcPath points={sunArc} cameraAz={calibratedAz} cameraAlt={calibratedAlt} color="#f5c542" strokeWidth={1.5} />
 
         {/* Moon arc */}
-        <ArcPath points={moonArc} cameraAz={pointing.azimuth} cameraAlt={pointing.altitude} color="#c4cee0" strokeWidth={1} />
+        <ArcPath points={moonArc} cameraAz={calibratedAz} cameraAlt={calibratedAlt} color="#c4cee0" strokeWidth={1} />
 
         {/* Sunset marker on the horizon */}
         {sunsetTime && sunsetTime > now && (
           <ARObject
             az={sunsetAz}
             alt={0}
-            cameraAz={pointing.azimuth}
-            cameraAlt={pointing.altitude}
+            cameraAz={calibratedAz}
+            cameraAlt={calibratedAlt}
             label={`Sunset ${sunsetTimeStr}`}
             color="#f59e0b"
             size={10}
@@ -340,8 +387,8 @@ export default function TrackerPage() {
           <ARObject
             az={sunAz}
             alt={sunAlt}
-            cameraAz={pointing.azimuth}
-            cameraAlt={pointing.altitude}
+            cameraAz={calibratedAz}
+            cameraAlt={calibratedAlt}
             label={sunAlt > 0 ? `Sun` : "Sun (below horizon)"}
             color="#f5c542"
             size={sunAlt > 0 ? 24 : 10}
@@ -354,8 +401,8 @@ export default function TrackerPage() {
           <ARObject
             az={moonAz}
             alt={moonAlt}
-            cameraAz={pointing.azimuth}
-            cameraAlt={pointing.altitude}
+            cameraAz={calibratedAz}
+            cameraAlt={calibratedAlt}
             label={`Moon ${Math.round(moonIllum.fraction * 100)}%`}
             color="#f5f0e8"
             size={20}
@@ -369,8 +416,8 @@ export default function TrackerPage() {
             key={star.name}
             az={star.az}
             alt={star.alt}
-            cameraAz={pointing.azimuth}
-            cameraAlt={pointing.altitude}
+            cameraAz={calibratedAz}
+            cameraAlt={calibratedAlt}
             label={star.name}
             color={star.color || "#c4cee0"}
             size={star.magnitude !== undefined ? Math.max(3, 10 - star.magnitude * 3) : 4}
@@ -390,8 +437,8 @@ export default function TrackerPage() {
               key={`${pass.satid}-${pass.startUTC}`}
               az={pos.az}
               alt={pos.alt}
-              cameraAz={pointing.azimuth}
-              cameraAlt={pointing.altitude}
+              cameraAz={calibratedAz}
+              cameraAlt={calibratedAlt}
               label={cleanName(pass.satname)}
               color={pass.category === "iss" ? "#5b8def" : pass.category === "starlink" ? "#a78bfa" : pass.category === "rocket-body" ? "#f59e0b" : "#ef4444"}
               size={pass.category === "iss" ? 14 : 8}
@@ -412,8 +459,8 @@ export default function TrackerPage() {
               key={`upcoming-${pass.satid}-${pass.startUTC}`}
               az={pass.startAz}
               alt={pass.startEl}
-              cameraAz={pointing.azimuth}
-              cameraAlt={pointing.altitude}
+              cameraAz={calibratedAz}
+              cameraAlt={calibratedAlt}
               label={`${cleanName(pass.satname)} in ${minsUntil}m`}
               color="#5a6580"
               size={6}
@@ -422,20 +469,46 @@ export default function TrackerPage() {
             />
           );
         })}
+
+        {/* Calibration overlay */}
+        {showCalibrate && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <div className="bg-black/70 backdrop-blur-md px-6 py-4 rounded-xl text-center pointer-events-auto">
+              <p className="text-white text-sm font-medium mb-1">Tap the Sun</p>
+              <p className="text-white/60 text-xs">Tap where you see the sun to calibrate positions</p>
+              <button
+                onClick={(e) => { e.stopPropagation(); setShowCalibrate(false); }}
+                className="mt-3 text-xs text-white/40 hover:text-white/70"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* HUD */}
       <div className="absolute top-0 left-0 right-0">
         <div className="flex justify-between items-start p-4 pt-12">
-          <a href="/" className="text-white/60 text-sm backdrop-blur-md bg-black/30 px-3 py-1.5 rounded-full">
-            ← Back
-          </a>
+          <div className="flex flex-col gap-2">
+            <a href="/" className="text-white/60 text-sm backdrop-blur-md bg-black/30 px-3 py-1.5 rounded-full">
+              ← Back
+            </a>
+            {sunAlt > 2 && (
+              <button
+                onClick={() => setShowCalibrate(true)}
+                className="text-white/60 text-xs backdrop-blur-md bg-black/30 px-3 py-1.5 rounded-full hover:text-amber-400 transition-colors"
+              >
+                {calibrated ? "✓ Calibrated" : "☀ Calibrate"}
+              </button>
+            )}
+          </div>
           <div className="text-right backdrop-blur-md bg-black/30 px-3 py-1.5 rounded-lg">
             <p className="text-white/90 text-sm font-mono">
-              {compassDirection(pointing.azimuth)} {Math.round(pointing.azimuth)}°
+              {compassDirection(calibratedAz)} {Math.round(calibratedAz)}°
             </p>
             <p className="text-white/50 text-xs font-mono">
-              Alt {Math.round(pointing.altitude)}°
+              Alt {Math.round(calibratedAlt)}°
             </p>
           </div>
         </div>
@@ -566,8 +639,8 @@ function TrailArc({ start, max, end, cameraAz, cameraAlt, color }: {
   const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
 
   return (
-    <svg className="absolute inset-0 w-full h-full pointer-events-none">
-      <path d={pathD} fill="none" stroke={color} strokeWidth="1" strokeDasharray="4 4" opacity="0.3" />
+    <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+      <path d={pathD} fill="none" stroke={color} strokeWidth="1" strokeDasharray="4 4" opacity="0.3" vectorEffect="non-scaling-stroke" />
     </svg>
   );
 }
@@ -592,8 +665,8 @@ function HorizonLine({ cameraAz, cameraAlt }: { cameraAz: number; cameraAlt: num
 
   return (
     <>
-      <svg className="absolute inset-0 w-full h-full pointer-events-none">
-        <path d={pathD} fill="none" stroke="#ffffff" strokeWidth="0.5" opacity="0.4" />
+      <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <path d={pathD} fill="none" stroke="#ffffff" strokeWidth="0.5" opacity="0.4" vectorEffect="non-scaling-stroke" />
       </svg>
       {cardinals.map(({ az, label }) => {
         const pos = projectToScreen(az, 0, cameraAz, cameraAlt);
@@ -640,12 +713,12 @@ function ArcPath({ points, cameraAz, cameraAlt, color, strokeWidth = 1 }: {
   }
 
   return (
-    <svg className="absolute inset-0 w-full h-full pointer-events-none">
+    <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
       {segments.filter((seg) => seg.length >= 2).map((seg, i) => {
         const d = seg.map((p, j) => `${j === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
         return (
           <path key={i} d={d} fill="none" stroke={color}
-            strokeWidth={strokeWidth} strokeDasharray="6 4" opacity="0.45" />
+            strokeWidth={strokeWidth} strokeDasharray="6 4" opacity="0.45" vectorEffect="non-scaling-stroke" />
         );
       })}
     </svg>
