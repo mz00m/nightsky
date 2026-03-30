@@ -83,27 +83,41 @@ export default function TrackerPage() {
       return;
     }
 
-    // Step 3: Location
-    setStep("location");
-    try {
-      const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000 });
-      });
-      const { latitude, longitude } = pos.coords;
-      setLat(latitude);
-      setLon(longitude);
-      setSkyObjects(getStarPositions(latitude, longitude, new Date()));
-
-      fetch(`/api/satellites?lat=${latitude}&lng=${longitude}&alt=0&mode=passes`)
-        .then((r) => r.json())
-        .then((data) => { if (data.passes) setPasses(data.passes); })
-        .catch(() => {});
-    } catch {
-      setError("Location access denied. Allow location permissions and reload.");
-      return;
-    }
-
+    // Step 3: Location — don't block on this, go straight to AR view
     setStep("ready");
+
+    // Try saved location first for instant load
+    try {
+      const saved = localStorage.getItem("nightsky-location");
+      if (saved) {
+        const { latitude, longitude } = JSON.parse(saved);
+        setLat(latitude);
+        setLon(longitude);
+        setSkyObjects(getStarPositions(latitude, longitude, new Date()));
+        fetch(`/api/satellites?lat=${latitude}&lng=${longitude}&alt=0&mode=passes`)
+          .then((r) => r.json())
+          .then((data) => { if (data.passes) setPasses(data.passes); })
+          .catch(() => {});
+      }
+    } catch { /* ignore */ }
+
+    // Get fresh GPS in background (updates saved location + sky data)
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        const { latitude, longitude } = pos.coords;
+        setLat(latitude);
+        setLon(longitude);
+        setSkyObjects(getStarPositions(latitude, longitude, new Date()));
+        localStorage.setItem("nightsky-location", JSON.stringify({ latitude, longitude }));
+
+        fetch(`/api/satellites?lat=${latitude}&lng=${longitude}&alt=0&mode=passes`)
+          .then((r) => r.json())
+          .then((data) => { if (data.passes) setPasses(data.passes); })
+          .catch(() => {});
+      },
+      () => { /* location failed — use saved or no satellite data */ },
+      { timeout: 10000 }
+    );
   }
 
   function handleOrientation(event: DeviceOrientationEvent) {

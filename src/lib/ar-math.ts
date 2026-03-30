@@ -53,44 +53,30 @@ export class OrientationSmoother {
 }
 
 export function deviceOrientationToPointing(
-  alpha: number, // compass heading (0-360, 0=North, clockwise)
-  beta: number, // front-back tilt (0=flat, 90=upright, 180=upside down)
+  alpha: number, // compass heading (0-360, 0=North, clockwise) — already corrected for iOS
+  beta: number, // front-back tilt (0=flat face up, 90=upright, 180=flat face down)
   gamma: number, // left-right tilt (-90 to 90)
-  screenOrientation: number
+  _screenOrientation: number
 ): CameraPointing {
-  // Convert to radians
-  const alphaRad = ((alpha + screenOrientation) * Math.PI) / 180;
-  const betaRad = (beta * Math.PI) / 180;
-  const gammaRad = (gamma * Math.PI) / 180;
+  // Simple, tested approach:
+  // - alpha IS the compass heading where the back camera points (azimuth)
+  // - beta tells us the phone tilt: 90=vertical (horizon), 0=flat (zenith)
+  // - gamma is a small azimuth correction for left/right lean
 
-  // Build rotation matrix from Euler angles (ZXY convention for device orientation)
-  // This properly handles all phone orientations including tilting
-  const cA = Math.cos(alphaRad);
-  const sA = Math.sin(alphaRad);
-  const cB = Math.cos(betaRad);
-  const sB = Math.sin(betaRad);
-  const cG = Math.cos(gammaRad);
-  const sG = Math.sin(gammaRad);
+  // Altitude: phone flat face-up (beta=0) → looking at zenith (90°)
+  //           phone vertical (beta=90) → looking at horizon (0°)
+  //           phone tilted back past vertical (beta>90) → looking below horizon
+  let altitude = 90 - beta;
+  altitude = Math.max(-90, Math.min(90, altitude));
 
-  // The camera in portrait mode looks along the phone's -Z axis (out the back camera).
-  // We need to find where this direction points in world coordinates.
-  // Device coordinate system: X=right, Y=up, Z=out of screen
-  // Camera looks along -Z in device coords, which is (0, 0, -1)
-
-  // Rotation matrix R = Rz(alpha) * Rx(beta) * Ry(gamma) (ZXY Euler)
-  // Transform the camera direction (0, 0, -1) through R:
-  const wx = -cA * sG - sA * sB * cG;
-  const wy = sA * sG - cA * sB * cG;
-  const wz = -cB * cG;
-
-  // wx, wy, wz is where the camera points in world coordinates
-  // world: X=East, Y=North, Z=Up
-
-  // Altitude: angle above horizon
-  const altitude = (Math.asin(Math.max(-1, Math.min(1, wz))) * 180) / Math.PI;
-
-  // Azimuth: angle from North, clockwise (atan2 gives angle from East, counterclockwise)
-  let azimuth = (Math.atan2(wx, wy) * 180) / Math.PI;
+  // Azimuth: compass heading, with gamma correction for lean
+  // When phone leans right (gamma>0), camera swings slightly right
+  let azimuth = alpha;
+  if (Math.abs(gamma) > 5) {
+    // Scale correction by how upright the phone is (more effect when vertical)
+    const uprightFactor = Math.sin((Math.min(beta, 90) * Math.PI) / 180);
+    azimuth = azimuth + gamma * 0.3 * uprightFactor;
+  }
   azimuth = ((azimuth % 360) + 360) % 360;
 
   return { azimuth, altitude };

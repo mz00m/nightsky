@@ -69,25 +69,42 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    // Try saved location first for instant load
+    try {
+      const saved = localStorage.getItem("nightsky-location");
+      if (saved) {
+        const loc = JSON.parse(saved);
+        loadSkyData({ latitude: loc.latitude, longitude: loc.longitude });
+      }
+    } catch { /* ignore */ }
+
     if (!navigator.geolocation) {
-      setLocationError("Geolocation not supported. Showing New York.");
-      loadSkyData({ latitude: 40.71, longitude: -74.01 });
+      if (!skyData) {
+        setLocationError("Geolocation not supported.");
+        loadSkyData({ latitude: 40.71, longitude: -74.01 });
+      }
       return;
     }
 
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        loadSkyData({
+        const loc = {
           latitude: position.coords.latitude,
           longitude: position.coords.longitude,
-        });
+        };
+        localStorage.setItem("nightsky-location", JSON.stringify(loc));
+        loadSkyData(loc);
       },
       () => {
-        setLocationError("Location access denied. Showing New York.");
-        loadSkyData({ latitude: 40.71, longitude: -74.01 });
+        // Only fall back to NYC if we don't have saved location
+        if (!skyData) {
+          setLocationError("Location access denied. Showing New York.");
+          loadSkyData({ latitude: 40.71, longitude: -74.01 });
+        }
       },
       { timeout: 10000, maximumAge: 300000 }
     );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadSkyData]);
 
   if (loading) {
