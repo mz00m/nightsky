@@ -1,9 +1,9 @@
 // Convert device orientation (alpha, beta, gamma) to where the camera is pointing
-// Returns azimuth (0-360, 0=North) and altitude (0-90, 0=horizon, 90=zenith)
+// Returns azimuth (0-360, 0=North) and altitude (-90 to 90, 0=horizon, 90=zenith)
 
 export interface CameraPointing {
-  azimuth: number; // degrees, 0=N, 90=E, 180=S, 270=W
-  altitude: number; // degrees above horizon
+  azimuth: number;
+  altitude: number;
 }
 
 export interface ScreenPosition {
@@ -13,62 +13,121 @@ export interface ScreenPosition {
   distance: number; // angular distance from center in degrees
 }
 
-export function deviceOrientationToPointing(
-  alpha: number, // compass heading (0-360)
-  beta: number, // front-back tilt (-180 to 180)
-  gamma: number, // left-right tilt (-90 to 90)
-  screenOrientation: number // window.screen.orientation.angle
-): CameraPointing {
-  // When phone is held up in portrait mode:
-  // beta ≈ 0 means phone flat, beta ≈ 90 means phone vertical
-  // alpha is compass heading (magnetic north)
+// Exponential moving average for smoothing noisy sensor data
+export class OrientationSmoother {
+  private alpha = 0;
+  private beta = 90;
+  private gamma = 0;
+  private initialized = false;
+  private readonly smoothing: number; // 0-1, higher = smoother (more lag)
 
-  // Adjust alpha for screen orientation
-  let azimuth = (alpha + screenOrientation) % 360;
-
-  // When phone is vertical (beta ~90), camera points at horizon
-  // When phone is tilted back (beta ~0), camera points at zenith
-  // beta goes: 0=flat face up, 90=vertical, 180=flat face down
-  let altitude = beta - 90; // Convert so 0=horizon when vertical
-
-  // Clamp altitude
-  altitude = Math.max(-90, Math.min(90, altitude));
-
-  // Adjust azimuth based on gamma (left-right tilt)
-  if (Math.abs(gamma) > 10) {
-    azimuth = (azimuth - gamma * 0.5 + 360) % 360;
+  constructor(smoothing = 0.85) {
+    this.smoothing = smoothing;
   }
+
+  update(rawAlpha: number, rawBeta: number, rawGamma: number) {
+    if (!this.initialized) {
+      this.alpha = rawAlpha;
+      this.beta = rawBeta;
+      this.gamma = rawGamma;
+      this.initialized = true;
+      return;
+    }
+
+    const k = this.smoothing;
+
+    // Smooth alpha (compass heading) — handle 0/360 wraparound
+    let dAlpha = rawAlpha - this.alpha;
+    if (dAlpha > 180) dAlpha -= 360;
+    if (dAlpha < -180) dAlpha += 360;
+    this.alpha = ((this.alpha + dAlpha * (1 - k)) % 360 + 360) % 360;
+
+    // Smooth beta and gamma linearly
+    this.beta = this.beta * k + rawBeta * (1 - k);
+    this.gamma = this.gamma * k + rawGamma * (1 - k);
+  }
+
+  get values() {
+    return { alpha: this.alpha, beta: this.beta, gamma: this.gamma };
+  }
+}
+
+export function deviceOrientationToPointing(
+  alpha: number, // compass heading (0-360, 0=North, clockwise)
+  beta: number, // front-back tilt (0=flat, 90=upright, 180=upside down)
+  gamma: number, // left-right tilt (-90 to 90)
+  screenOrientation: number
+): CameraPointing {
+  // Convert to radians
+  const alphaRad = ((alpha + screenOrientation) * Math.PI) / 180;
+  const betaRad = (beta * Math.PI) / 180;
+  const gammaRad = (gamma * Math.PI) / 180;
+
+  // Build rotation matrix from Euler angles (ZXY convention for device orientation)
+  // This properly handles all phone orientations including tilting
+  const cA = Math.cos(alphaRad);
+  const sA = Math.sin(alphaRad);
+  const cB = Math.cos(betaRad);
+  const sB = Math.sin(betaRad);
+  const cG = Math.cos(gammaRad);
+  const sG = Math.sin(gammaRad);
+
+  // The camera in portrait mode looks along the phone's -Z axis (out the back camera).
+  // We need to find where this direction points in world coordinates.
+  // Device coordinate system: X=right, Y=up, Z=out of screen
+  // Camera looks along -Z in device coords, which is (0, 0, -1)
+
+  // Rotation matrix R = Rz(alpha) * Rx(beta) * Ry(gamma) (ZXY Euler)
+  // Transform the camera direction (0, 0, -1) through R:
+  const wx = -cA * sG - sA * sB * cG;
+  const wy = sA * sG - cA * sB * cG;
+  const wz = -cB * cG;
+
+  // wx, wy, wz is where the camera points in world coordinates
+  // world: X=East, Y=North, Z=Up
+
+  // Altitude: angle above horizon
+  const altitude = (Math.asin(Math.max(-1, Math.min(1, wz))) * 180) / Math.PI;
+
+  // Azimuth: angle from North, clockwise (atan2 gives angle from East, counterclockwise)
+  let azimuth = (Math.atan2(wx, wy) * 180) / Math.PI;
+  azimuth = ((azimuth % 360) + 360) % 360;
 
   return { azimuth, altitude };
 }
 
-// Project a sky object (at given az/alt) onto the screen
-// given where the camera is pointing
+// Project a sky object onto the screen
 export function projectToScreen(
   objectAz: number,
   objectAlt: number,
   cameraAz: number,
   cameraAlt: number,
-  fovH: number = 60, // horizontal field of view in degrees
-  fovV: number = 80 // vertical field of view in degrees (portrait)
+  fovH: number = 65, // horizontal FOV in degrees (typical phone)
+  fovV: number = 95 // vertical FOV in portrait
 ): ScreenPosition {
-  // Angular difference in azimuth
+  // Angular difference in azimuth, accounting for foreshortening at high altitudes
   let dAz = objectAz - cameraAz;
-  // Normalize to -180..180
   if (dAz > 180) dAz -= 360;
   if (dAz < -180) dAz += 360;
 
-  // Angular difference in altitude
+  // At high altitudes, azimuth differences map to smaller angular distances
+  // (lines of azimuth converge at the zenith, like longitude lines at the pole)
+  const avgAlt = (objectAlt + cameraAlt) / 2;
+  const azScale = Math.cos((avgAlt * Math.PI) / 180);
+  const effectiveDaz = dAz * Math.max(azScale, 0.15); // don't collapse fully at zenith
+
+  // Altitude difference
   const dAlt = objectAlt - cameraAlt;
 
-  // Distance from center of view
-  const distance = Math.sqrt(dAz * dAz + dAlt * dAlt);
+  // Angular distance
+  const distance = Math.sqrt(effectiveDaz * effectiveDaz + dAlt * dAlt);
 
-  // Map to screen coordinates (0-1)
-  const x = 0.5 + dAz / fovH;
-  const y = 0.5 - dAlt / fovV; // invert: higher alt = higher on screen
+  // Map to screen (0-1)
+  const x = 0.5 + effectiveDaz / fovH;
+  const y = 0.5 - dAlt / fovV;
 
-  const visible = x >= -0.1 && x <= 1.1 && y >= -0.1 && y <= 1.1;
+  // Wider margin so arcs don't clip at screen edges
+  const visible = x >= -0.3 && x <= 1.3 && y >= -0.3 && y <= 1.3;
 
   return { x, y, visible, distance };
 }
@@ -91,33 +150,29 @@ export function interpolatePassPosition(
   const elapsed = nowUTC - startUTC;
   const progress = elapsed / totalDuration;
 
-  // Two-segment interpolation: start->max (first half), max->end (second half)
   let az: number, alt: number;
 
   if (progress < 0.5) {
-    const t = progress * 2; // 0-1 within first half
-    az = lerp(startAz, maxAz, t);
-    alt = lerp(startAlt, maxAlt, t);
+    const t = progress * 2;
+    az = lerpAngle(startAz, maxAz, t);
+    alt = startAlt + (maxAlt - startAlt) * t;
   } else {
-    const t = (progress - 0.5) * 2; // 0-1 within second half
-    az = lerp(maxAz, endAz, t);
-    alt = lerp(maxAlt, endAlt, t);
+    const t = (progress - 0.5) * 2;
+    az = lerpAngle(maxAz, endAz, t);
+    alt = maxAlt + (endAlt - maxAlt) * t;
   }
 
   return { az, alt, progress };
 }
 
-function lerp(a: number, b: number, t: number): number {
-  // Handle azimuth wrapping (e.g., 350° to 10°)
+function lerpAngle(a: number, b: number, t: number): number {
   let diff = b - a;
-  if (Math.abs(diff) > 180) {
-    if (diff > 0) diff -= 360;
-    else diff += 360;
-  }
+  if (diff > 180) diff -= 360;
+  if (diff < -180) diff += 360;
   return ((a + diff * t) % 360 + 360) % 360;
 }
 
-// Bright reference stars with fixed positions (epoch J2000, precessed approximately)
+// Star catalog
 export interface SkyObject {
   name: string;
   az: number;
@@ -127,8 +182,6 @@ export interface SkyObject {
   color?: string;
 }
 
-// Calculate azimuth/altitude for a set of bright stars given observer location and time
-// Using simplified equatorial-to-horizontal conversion
 export function getStarPositions(
   lat: number,
   lon: number,
@@ -136,8 +189,8 @@ export function getStarPositions(
 ): SkyObject[] {
   const stars: {
     name: string;
-    ra: number; // hours
-    dec: number; // degrees
+    ra: number;
+    dec: number;
     mag: number;
     color: string;
   }[] = [
@@ -154,9 +207,11 @@ export function getStarPositions(
     { name: "Deneb", ra: 20.69, dec: 45.28, mag: 1.25, color: "#d8e8ff" },
     { name: "Regulus", ra: 10.14, dec: 11.97, mag: 1.36, color: "#c0d8ff" },
     { name: "Polaris", ra: 2.53, dec: 89.26, mag: 1.98, color: "#fff8e0" },
+    { name: "Fomalhaut", ra: 22.96, dec: -29.62, mag: 1.16, color: "#d0e0ff" },
+    { name: "Altair", ra: 19.85, dec: 8.87, mag: 0.76, color: "#e0ecff" },
+    { name: "Procyon", ra: 7.65, dec: 5.22, mag: 0.34, color: "#fff8e0" },
   ];
 
-  // Calculate Local Sidereal Time
   const jd = julianDate(date);
   const T = (jd - 2451545.0) / 36525.0;
   let gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0) + 0.000387933 * T * T;
@@ -167,18 +222,15 @@ export function getStarPositions(
 
   return stars
     .map((star) => {
-      // Hour angle
       const ha = (((lst - star.ra * 15) % 360) + 360) % 360;
       const haRad = (ha * Math.PI) / 180;
       const decRad = (star.dec * Math.PI) / 180;
 
-      // Altitude
       const sinAlt =
         Math.sin(latRad) * Math.sin(decRad) +
         Math.cos(latRad) * Math.cos(decRad) * Math.cos(haRad);
       const alt = (Math.asin(sinAlt) * 180) / Math.PI;
 
-      // Azimuth
       const cosAz =
         (Math.sin(decRad) - Math.sin(latRad) * sinAlt) /
         (Math.cos(latRad) * Math.cos((alt * Math.PI) / 180));
@@ -194,7 +246,7 @@ export function getStarPositions(
         color: star.color,
       };
     })
-    .filter((s) => s.alt > 0); // Only above horizon
+    .filter((s) => s.alt > 0);
 }
 
 function julianDate(date: Date): number {
