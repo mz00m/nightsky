@@ -14,7 +14,7 @@ const nextConfig: NextConfig = {
               "style-src 'self' 'unsafe-inline'",
               "img-src 'self' data: blob:",
               "media-src 'self' blob:",
-              "connect-src 'self' https://api.n2yo.com",
+              "connect-src 'self' https://celestrak.org",
               "frame-ancestors 'none'",
             ].join("; "),
           },

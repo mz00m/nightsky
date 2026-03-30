@@ -37,16 +37,14 @@ export const TRACKED_OBJECTS = {
   HST: 20580, // Hubble
 } as const;
 
-// N2YO category IDs
-// 0 = unclassified, 52 = debris
-export const CATEGORIES = {
-  ALL: 0,
-  BRIGHTEST: 1,
-  ISS: 2,
-  WEATHER: 3,
-  STARLINK: 52, // Starlink constellation
-  ROCKET_BODY: 8,
-  DEBRIS: 50,
+// CelesTrak catalog names
+export const CELESTRAK_CATALOGS = {
+  VISUAL: "visual",
+  STATIONS: "stations",
+  STARLINK: "starlink",
+  COSMOS_DEBRIS: "cosmos-2251-debris",
+  IRIDIUM_DEBRIS: "iridium-33-debris",
+  ROCKET_BODIES: "1999-025",
 } as const;
 
 export function formatPassTime(utcSeconds: number): string {

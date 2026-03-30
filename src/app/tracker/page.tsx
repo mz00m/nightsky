@@ -2,16 +2,23 @@
 
 import { useEffect, useRef, useState } from "react";
 import SunCalc from "suncalc";
-import { SatellitePass } from "@/lib/satellites";
 import {
   CameraPointing,
   OrientationSmoother,
   deviceOrientationToPointing,
   projectToScreen,
-  interpolatePassPosition,
   getStarPositions,
   SkyObject,
 } from "@/lib/ar-math";
+import {
+  TLERecord,
+  SatelliteRecord,
+  VisibleSatellite,
+  parseTLEText,
+  initSatellites,
+  getVisibleSatellites,
+} from "@/lib/propagation";
+import { getCategoryColor } from "@/lib/satellites";
 
 type InitStep = "idle" | "orientation" | "camera" | "location" | "ready";
 
@@ -28,10 +35,15 @@ export default function TrackerPage() {
 
   const [lat, setLat] = useState(0);
   const [lon, setLon] = useState(0);
-  const [passes, setPasses] = useState<SatellitePass[]>([]);
   const [skyObjects, setSkyObjects] = useState<SkyObject[]>([]);
   const animFrameRef = useRef<number>(0);
   const lastRenderRef = useRef(0);
+
+  // CelesTrak satellite data
+  const satellitesRef = useRef<SatelliteRecord[]>([]);
+  const [visibleSats, setVisibleSats] = useState<VisibleSatellite[]>([]);
+  const [satCount, setSatCount] = useState(0);
+  const [tleLoading, setTleLoading] = useState(true);
 
   // Calibration: offset between computed and actual sky positions
   const calibrationRef = useRef<{ azOffset: number; altOffset: number }>({ azOffset: 0, altOffset: 0 });
@@ -47,6 +59,30 @@ export default function TrackerPage() {
       });
     }
   }, [step]);
+
+  // Fetch TLE data when location is available
+  useEffect(() => {
+    if (lat === 0 && lon === 0) return;
+
+    const catalogs = "visual,stations,cosmos-2251-debris,iridium-33-debris,1999-025";
+
+    fetch(`/api/tle?catalogs=${catalogs}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (!data.tles) return;
+        const allRecords: TLERecord[] = [];
+        for (const [catalog, text] of Object.entries(data.tles)) {
+          allRecords.push(...parseTLEText(text as string, catalog));
+        }
+        const sats = initSatellites(allRecords);
+        satellitesRef.current = sats;
+        setSatCount(sats.length);
+        setTleLoading(false);
+      })
+      .catch(() => {
+        setTleLoading(false);
+      });
+  }, [lat, lon]);
 
   async function init() {
     // Step 1: Orientation (must be first for iOS gesture chain)
@@ -99,14 +135,10 @@ export default function TrackerPage() {
         setLat(latitude);
         setLon(longitude);
         setSkyObjects(getStarPositions(latitude, longitude, new Date()));
-        fetch(`/api/satellites?lat=${latitude}&lng=${longitude}&alt=0&mode=passes`)
-          .then((r) => r.json())
-          .then((data) => { if (data.passes) setPasses(data.passes); })
-          .catch(() => {});
       }
     } catch { /* ignore */ }
 
-    // Get fresh GPS in background (updates saved location + sky data)
+    // Get fresh GPS in background
     navigator.geolocation.getCurrentPosition(
       (pos) => {
         const { latitude, longitude } = pos.coords;
@@ -114,13 +146,8 @@ export default function TrackerPage() {
         setLon(longitude);
         setSkyObjects(getStarPositions(latitude, longitude, new Date()));
         localStorage.setItem("nightsky-location", JSON.stringify({ latitude, longitude }));
-
-        fetch(`/api/satellites?lat=${latitude}&lng=${longitude}&alt=0&mode=passes`)
-          .then((r) => r.json())
-          .then((data) => { if (data.passes) setPasses(data.passes); })
-          .catch(() => {});
       },
-      () => { /* location failed — use saved or no satellite data */ },
+      () => { /* location failed — use saved */ },
       { timeout: 10000 }
     );
   }
@@ -131,13 +158,14 @@ export default function TrackerPage() {
         .webkitCompassHeading ??
       (event.absolute ? (360 - (event.alpha || 0)) % 360 : event.alpha || 0);
 
-    // Feed raw values into smoother
     smootherRef.current.update(alpha, event.beta || 0, event.gamma || 0);
   }
 
-  // Animation loop — samples smoothed orientation, throttles React renders to ~20fps
+  // Animation loop — samples smoothed orientation, propagates satellites, throttles React renders
   useEffect(() => {
     if (step !== "ready") return;
+
+    let satPropagateCounter = 0;
 
     const loop = () => {
       const { alpha, beta, gamma } = smootherRef.current.values;
@@ -152,6 +180,16 @@ export default function TrackerPage() {
       const now = performance.now();
       if (now - lastRenderRef.current > 50) {
         lastRenderRef.current = now;
+
+        // Propagate satellites every 5th render (~4fps is plenty for slow-moving sats)
+        satPropagateCounter++;
+        if (satPropagateCounter % 5 === 0 && satellitesRef.current.length > 0 && lat !== 0) {
+          const visible = getVisibleSatellites(
+            satellitesRef.current, new Date(), lat, lon, 0, -2
+          );
+          setVisibleSats(visible);
+        }
+
         setRenderTick((t) => t + 1);
       }
 
@@ -189,23 +227,19 @@ export default function TrackerPage() {
     const trueSunAz = ((sp.azimuth * 180) / Math.PI + 180) % 360;
     const trueSunAlt = (sp.altitude * 180) / Math.PI;
 
-    if (trueSunAlt < 2) return; // sun too low to calibrate reliably
+    if (trueSunAlt < 2) return;
 
-    // Where the user tapped (0-1)
     const tapX = screenX / window.innerWidth;
     const tapY = screenY / window.innerHeight;
 
-    // Reverse project: screen position → sky position relative to camera
     const fovH = 65;
     const fovV = 95;
     const tapAzOffset = (tapX - 0.5) * fovH;
     const tapAltOffset = (0.5 - tapY) * fovV;
 
-    // The tap point's sky position = camera pointing + offset from center
     const tapSkyAz = ((pointing.azimuth + tapAzOffset) % 360 + 360) % 360;
     const tapSkyAlt = pointing.altitude + tapAltOffset;
 
-    // Calibration offset = difference between true sun position and where gyro says the tap was
     let azDiff = trueSunAz - tapSkyAz;
     if (azDiff > 180) azDiff -= 360;
     if (azDiff < -180) azDiff += 360;
@@ -273,14 +307,8 @@ export default function TrackerPage() {
     }
   }
 
-  // Satellite passes
-  const nowUTC = Math.floor(Date.now() / 1000);
-  const activePasses = passes.filter(
-    (p) => nowUTC >= p.startUTC - 300 && nowUTC <= p.endUTC + 60
-  );
-  const upcomingPasses = passes
-    .filter((p) => p.startUTC > nowUTC && p.startUTC - nowUTC < 7200)
-    .slice(0, 3);
+  // Suppress unused variable warning
+  void renderTick;
 
   // Setup / loading / error screens
   if (step !== "ready") {
@@ -342,6 +370,10 @@ export default function TrackerPage() {
     );
   }
 
+  // Separate visible sats into categories for rendering
+  const overheadSats = visibleSats.filter((s) => s.elevation > 0);
+  const sunlitCount = overheadSats.filter((s) => s.inSunlight).length;
+
   return (
     <div className="fixed inset-0 overflow-hidden bg-black">
       {/* Camera feed */}
@@ -389,7 +421,7 @@ export default function TrackerPage() {
             alt={sunAlt}
             cameraAz={calibratedAz}
             cameraAlt={calibratedAlt}
-            label={sunAlt > 0 ? `Sun` : "Sun (below horizon)"}
+            label={sunAlt > 0 ? "Sun" : "Sun (below horizon)"}
             color="#f5c542"
             size={sunAlt > 0 ? 24 : 10}
             type="moon"
@@ -425,50 +457,22 @@ export default function TrackerPage() {
           />
         ))}
 
-        {/* Active satellite passes */}
-        {activePasses.map((pass) => {
-          const pos = interpolatePassPosition(
-            pass.startAz, pass.startEl, pass.maxAz, pass.maxEl,
-            pass.endAz, pass.endEl, pass.startUTC, pass.endUTC, nowUTC
-          );
-          if (!pos) return null;
-          return (
-            <ARObject
-              key={`${pass.satid}-${pass.startUTC}`}
-              az={pos.az}
-              alt={pos.alt}
-              cameraAz={calibratedAz}
-              cameraAlt={calibratedAlt}
-              label={cleanName(pass.satname)}
-              color={pass.category === "iss" ? "#5b8def" : pass.category === "starlink" ? "#a78bfa" : pass.category === "rocket-body" ? "#f59e0b" : "#ef4444"}
-              size={pass.category === "iss" ? 14 : 8}
-              type="satellite"
-              showTrail
-              trailStart={{ az: pass.startAz, alt: pass.startEl }}
-              trailEnd={{ az: pass.endAz, alt: pass.endEl }}
-              trailMax={{ az: pass.maxAz, alt: pass.maxEl }}
-            />
-          );
-        })}
-
-        {/* Upcoming passes */}
-        {upcomingPasses.map((pass) => {
-          const minsUntil = Math.round((pass.startUTC - nowUTC) / 60);
-          return (
-            <ARObject
-              key={`upcoming-${pass.satid}-${pass.startUTC}`}
-              az={pass.startAz}
-              alt={pass.startEl}
-              cameraAz={calibratedAz}
-              cameraAlt={calibratedAlt}
-              label={`${cleanName(pass.satname)} in ${minsUntil}m`}
-              color="#5a6580"
-              size={6}
-              type="upcoming"
-              dimmed
-            />
-          );
-        })}
+        {/* Real-time satellites from CelesTrak/SGP4 */}
+        {overheadSats.map((sat) => (
+          <ARObject
+            key={sat.noradId}
+            az={sat.azimuth}
+            alt={sat.elevation}
+            cameraAz={calibratedAz}
+            cameraAlt={calibratedAlt}
+            label={cleanName(sat.name)}
+            color={getCategoryColor(sat.category)}
+            size={sat.category === "iss" ? 14 : sat.category === "debris" ? 5 : 8}
+            type="satellite"
+            dimmed={!sat.inSunlight}
+            subtitle={`${Math.round(sat.altitude)}km · ${sat.inSunlight ? "sunlit" : "shadow"}`}
+          />
+        ))}
 
         {/* Calibration overlay */}
         {showCalibrate && (
@@ -517,27 +521,29 @@ export default function TrackerPage() {
       {/* Bottom panel */}
       <div className="absolute bottom-0 left-0 right-0">
         <div className="p-4 pb-8 backdrop-blur-md bg-black/40">
-          {activePasses.length > 0 ? (
-            <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-accent-blue animate-pulse" />
-              <p className="text-white/90 text-sm">
-                {activePasses.length} satellite{activePasses.length !== 1 ? "s" : ""} passing now
-              </p>
-            </div>
-          ) : (
-            <div className="flex items-center justify-between">
-              <p className="text-white/50 text-sm">
-                {upcomingPasses.length > 0
-                  ? `Next: ${cleanName(upcomingPasses[0].satname)} in ${Math.round((upcomingPasses[0].startUTC - nowUTC) / 60)}m`
-                  : "Point at the sky — objects are labeled"}
-              </p>
-              {sunsetTimeStr && sunsetTime && sunsetTime > now && (
-                <p className="text-amber-400/70 text-xs">
-                  Sunset {sunsetTimeStr}
+          <div className="flex items-center justify-between">
+            <div>
+              {tleLoading ? (
+                <p className="text-white/50 text-sm">Loading satellite data...</p>
+              ) : overheadSats.length > 0 ? (
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-accent-blue animate-pulse" />
+                  <p className="text-white/90 text-sm">
+                    {overheadSats.length} overhead{sunlitCount > 0 ? ` · ${sunlitCount} sunlit` : ""}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-white/50 text-sm">
+                  {satCount > 0 ? `Tracking ${satCount} objects` : "Point at the sky — objects are labeled"}
                 </p>
               )}
             </div>
-          )}
+            {sunsetTimeStr && sunsetTime && sunsetTime > now && (
+              <p className="text-amber-400/70 text-xs">
+                Sunset {sunsetTimeStr}
+              </p>
+            )}
+          </div>
         </div>
       </div>
 
@@ -554,94 +560,68 @@ export default function TrackerPage() {
 // AR object renderer
 function ARObject({
   az, alt, cameraAz, cameraAlt, label, color, size, type,
-  dimmed = false, showTrail = false, trailStart, trailMax, trailEnd,
+  dimmed = false, subtitle,
 }: {
   az: number; alt: number; cameraAz: number; cameraAlt: number;
   label: string; color: string; size: number;
   type: "star" | "moon" | "satellite" | "upcoming";
-  dimmed?: boolean; showTrail?: boolean;
-  trailStart?: { az: number; alt: number };
-  trailMax?: { az: number; alt: number };
-  trailEnd?: { az: number; alt: number };
+  dimmed?: boolean;
+  subtitle?: string;
 }) {
   const pos = projectToScreen(az, alt, cameraAz, cameraAlt);
   if (!pos.visible) return null;
 
-  const opacity = dimmed ? 0.4 : pos.distance > 25 ? 0.6 : 1;
+  const opacity = dimmed ? 0.35 : pos.distance > 25 ? 0.6 : 1;
 
   return (
-    <>
-      {showTrail && trailStart && trailMax && trailEnd && (
-        <TrailArc start={trailStart} max={trailMax} end={trailEnd}
-          cameraAz={cameraAz} cameraAlt={cameraAlt} color={color} />
+    <div
+      className="absolute pointer-events-none"
+      style={{
+        left: `${pos.x * 100}%`,
+        top: `${pos.y * 100}%`,
+        transform: "translate(-50%, -50%)",
+        opacity,
+        willChange: "left, top",
+      }}
+    >
+      {type === "satellite" ? (
+        <div
+          className="rounded-full animate-pulse"
+          style={{ width: size, height: size, backgroundColor: color, boxShadow: `0 0 ${size * 2}px ${color}80` }}
+        />
+      ) : (
+        <div
+          className="rounded-full"
+          style={{ width: size, height: size, backgroundColor: color, boxShadow: `0 0 ${size}px ${color}60` }}
+        />
       )}
 
-      <div
-        className="absolute pointer-events-none"
-        style={{
-          left: `${pos.x * 100}%`,
-          top: `${pos.y * 100}%`,
-          transform: "translate(-50%, -50%)",
-          opacity,
-          willChange: "left, top",
-        }}
-      >
-        {type === "satellite" ? (
-          <div
-            className="rounded-full animate-pulse"
-            style={{ width: size, height: size, backgroundColor: color, boxShadow: `0 0 ${size * 2}px ${color}80` }}
-          />
-        ) : (
-          <div
-            className="rounded-full"
-            style={{ width: size, height: size, backgroundColor: color, boxShadow: `0 0 ${size}px ${color}60` }}
-          />
+      <div className="absolute whitespace-nowrap flex flex-col items-center"
+        style={{ top: size + 2, left: "50%", transform: "translateX(-50%)" }}>
+        {type !== "star" && (
+          <span className="text-[8px] uppercase tracking-wider px-1 py-0.5 rounded mb-0.5"
+            style={{ color: "#fff", backgroundColor: `${color}60`, textShadow: "0 1px 2px rgba(0,0,0,0.9)" }}>
+            {type === "moon" ? "Moon" : type === "satellite" ? "Sat" : type === "upcoming" ? "Soon" : ""}
+          </span>
         )}
-
-        <div className="absolute whitespace-nowrap flex flex-col items-center"
-          style={{ top: size + 2, left: "50%", transform: "translateX(-50%)" }}>
-          {type !== "star" && (
-            <span className="text-[8px] uppercase tracking-wider px-1 py-0.5 rounded mb-0.5"
-              style={{ color: "#fff", backgroundColor: `${color}60`, textShadow: "0 1px 2px rgba(0,0,0,0.9)" }}>
-              {type === "moon" ? "Moon" : type === "satellite" ? "Satellite" : type === "upcoming" ? "Soon" : ""}
-            </span>
-          )}
+        <p style={{
+          fontSize: type === "star" ? "10px" : "11px",
+          color, textShadow: "0 1px 4px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.7)",
+          fontWeight: type === "star" ? 500 : 600,
+        }}>
+          {label}
+        </p>
+        {subtitle && (
           <p style={{
-            fontSize: type === "star" ? "10px" : "12px",
-            color, textShadow: "0 1px 4px rgba(0,0,0,0.9), 0 0 8px rgba(0,0,0,0.7)",
-            fontWeight: type === "star" ? 500 : 600,
+            fontSize: "8px",
+            color: `${color}99`,
+            textShadow: "0 1px 3px rgba(0,0,0,0.9)",
           }}>
-            {label}
+            {subtitle}
           </p>
-        </div>
+        )}
       </div>
-    </>
-  );
-}
-
-function TrailArc({ start, max, end, cameraAz, cameraAlt, color }: {
-  start: { az: number; alt: number }; max: { az: number; alt: number };
-  end: { az: number; alt: number }; cameraAz: number; cameraAlt: number; color: string;
-}) {
-  const points: { x: number; y: number }[] = [];
-  for (let t = 0; t <= 1; t += 0.05) {
-    const az = t < 0.5
-      ? start.az + (max.az - start.az) * t * 2
-      : max.az + (end.az - max.az) * (t - 0.5) * 2;
-    const alt = t < 0.5
-      ? start.alt + (max.alt - start.alt) * t * 2
-      : max.alt + (end.alt - max.alt) * (t - 0.5) * 2;
-    const pos = projectToScreen(az, alt, cameraAz, cameraAlt);
-    if (pos.visible) points.push({ x: pos.x * 100, y: pos.y * 100 });
-  }
-
-  if (points.length < 2) return null;
-  const pathD = points.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
-
-  return (
-    <svg className="absolute inset-0 w-full h-full pointer-events-none" viewBox="0 0 100 100" preserveAspectRatio="none">
-      <path d={pathD} fill="none" stroke={color} strokeWidth="1" strokeDasharray="4 4" opacity="0.3" vectorEffect="non-scaling-stroke" />
-    </svg>
+    </div>
   );
 }
 
@@ -726,8 +706,15 @@ function ArcPath({ points, cameraAz, cameraAlt, color, strokeWidth = 1 }: {
 }
 
 function cleanName(name: string): string {
-  return name.replace(/^ISS \(ZARYA\)/, "ISS").replace(/^CSS \(TIANHE\)/, "Tiangong")
-    .replace(/^STARLINK-/, "Starlink ").replace(/ R\/B$/, "").replace(/ DEB$/, "");
+  return name
+    .replace(/^ISS \(ZARYA\)/, "ISS")
+    .replace(/^CSS \(TIANHE\)/, "Tiangong")
+    .replace(/^STARLINK-/, "Starlink ")
+    .replace(/ R\/B$/, " (rocket)")
+    .replace(/ DEB$/, " (debris)")
+    .replace(/^CZ-/, "CZ ")
+    .replace(/^SL-/, "SL ")
+    .replace(/^COSMOS /, "Cosmos ");
 }
 
 function compassDirection(az: number): string {

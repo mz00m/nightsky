@@ -12,6 +12,14 @@ import { PlanetList } from "@/components/PlanetList";
 import { SatellitePasses } from "@/components/SatellitePasses";
 import { OverheadNow } from "@/components/OverheadNow";
 import { LocationSearch } from "@/components/LocationSearch";
+import {
+  TLERecord,
+  SatelliteRecord,
+  parseTLEText,
+  initSatellites,
+  getVisibleSatellites,
+  predictAllPasses,
+} from "@/lib/propagation";
 
 interface OverheadData {
   bright: { satid: number; satname: string; satlat: number; satlng: number; satalt: number }[];
@@ -27,46 +35,113 @@ export default function Home() {
   const [satLoading, setSatLoading] = useState(true);
   const [overheadLoading, setOverheadLoading] = useState(true);
   const [satError, setSatError] = useState<string | null>(null);
-  const [locationError, setLocationError] = useState<string | null>(null);
+  const [, setLocationError] = useState<string | null>(null);
+  const [currentLocation, setCurrentLocation] = useState<Location | null>(null);
+
+  // Satellite records from TLE data
+  const [satellites, setSatellites] = useState<SatelliteRecord[]>([]);
 
   const loadSkyData = useCallback((location: Location) => {
     const data = calculateSkyData(location, new Date());
     setSkyData(data);
     setLoading(false);
+    setCurrentLocation(location);
+  }, []);
 
-    // Fetch satellite passes
-    fetch(
-      `/api/satellites?lat=${location.latitude}&lng=${location.longitude}&alt=0&mode=passes`
-    )
-      .then((res) => res.json())
+  // Fetch TLE data when location is set
+  useEffect(() => {
+    if (!currentLocation) return;
+
+    const catalogs = "visual,stations,cosmos-2251-debris,iridium-33-debris,1999-025";
+
+    fetch(`/api/tle?catalogs=${catalogs}`)
+      .then((r) => r.json())
       .then((data) => {
-        if (data.error && data.passes?.length === 0) {
-          setSatError("Satellite tracking is temporarily unavailable.");
-        } else {
-          setPasses(data.passes || []);
+        if (!data.tles) {
+          setSatError("Could not load satellite data");
+          setSatLoading(false);
+          setOverheadLoading(false);
+          return;
         }
-        setSatLoading(false);
+
+        const allRecords: TLERecord[] = [];
+        for (const [catalog, text] of Object.entries(data.tles)) {
+          allRecords.push(...parseTLEText(text as string, catalog));
+        }
+        const sats = initSatellites(allRecords);
+        setSatellites(sats);
+
+        // Compute what's overhead now
+        const visible = getVisibleSatellites(
+          sats, new Date(), currentLocation.latitude, currentLocation.longitude, 0, 10
+        );
+
+        const overheadData: OverheadData = {
+          bright: visible
+            .filter((s) => s.category === "satellite" || s.category === "iss" || s.category === "starlink")
+            .slice(0, 20)
+            .map((s) => ({
+              satid: s.noradId,
+              satname: s.name,
+              satlat: s.lat,
+              satlng: s.lon,
+              satalt: s.altitude,
+            })),
+          rocketBodies: visible
+            .filter((s) => s.category === "rocket-body")
+            .slice(0, 20)
+            .map((s) => ({
+              satid: s.noradId,
+              satname: s.name,
+              satlat: s.lat,
+              satlng: s.lon,
+              satalt: s.altitude,
+            })),
+          debris: visible
+            .filter((s) => s.category === "debris")
+            .slice(0, 20)
+            .map((s) => ({
+              satid: s.noradId,
+              satname: s.name,
+              satlat: s.lat,
+              satlng: s.lon,
+              satalt: s.altitude,
+            })),
+        };
+
+        setOverhead(overheadData);
+        setOverheadLoading(false);
       })
       .catch(() => {
         setSatError("Could not load satellite data");
         setSatLoading(false);
+        setOverheadLoading(false);
       });
+  }, [currentLocation]);
 
-    // Fetch what's overhead now
-    fetch(
-      `/api/satellites?lat=${location.latitude}&lng=${location.longitude}&alt=0&mode=above`
-    )
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.above) {
-          setOverhead(data.above);
-        }
-        setOverheadLoading(false);
-      })
-      .catch(() => {
-        setOverheadLoading(false);
-      });
-  }, []);
+  // Compute pass predictions in a separate effect (CPU-intensive)
+  useEffect(() => {
+    if (satellites.length === 0 || !currentLocation) return;
+
+    // Use setTimeout to avoid blocking the main thread during initial render
+    const timer = setTimeout(() => {
+      try {
+        const predicted = predictAllPasses(
+          satellites,
+          currentLocation.latitude,
+          currentLocation.longitude,
+          0,
+          120 // 5 days
+        );
+        setPasses(predicted);
+      } catch {
+        setSatError("Could not compute pass predictions");
+      }
+      setSatLoading(false);
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [satellites, currentLocation]);
 
   useEffect(() => {
     // Try saved location first for instant load
@@ -96,7 +171,6 @@ export default function Home() {
         loadSkyData(loc);
       },
       () => {
-        // Only fall back to NYC if we don't have saved location
         if (!skyData) {
           setLocationError("Location access denied. Showing New York.");
           loadSkyData({ latitude: 40.71, longitude: -74.01 });
@@ -155,6 +229,7 @@ export default function Home() {
                 setSatLoading(true);
                 setOverheadLoading(true);
                 setSatError(null);
+                setSatellites([]);
                 loadSkyData(loc);
               }}
               currentName={skyData.location.name}
@@ -349,8 +424,8 @@ export default function Home() {
         {/* Footer */}
         <footer className="text-center text-xs text-text-dim py-8 border-t border-border/30">
           <p>
-            Satellite data from N2YO. Sky calculations use your device&apos;s
-            location and time. Planet positions are approximate.
+            Satellite orbits from CelesTrak. Positions computed with SGP4.
+            Sky calculations use your device&apos;s location and time.
           </p>
         </footer>
       </main>
