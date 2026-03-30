@@ -35,8 +35,7 @@ export function LocationSearch({
       setSearching(true);
       try {
         const res = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&limit=5&q=${encodeURIComponent(value)}`,
-          { headers: { "User-Agent": "nightsky-app" } }
+          `/api/geocode?q=${encodeURIComponent(value)}`
         );
         const data: SearchResult[] = await res.json();
         setResults(data);

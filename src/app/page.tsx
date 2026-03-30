@@ -41,9 +41,7 @@ export default function Home() {
       .then((res) => res.json())
       .then((data) => {
         if (data.error && data.passes?.length === 0) {
-          setSatError(
-            "Satellite tracking requires an N2YO API key. Add N2YO_API_KEY to your environment."
-          );
+          setSatError("Satellite tracking is temporarily unavailable.");
         } else {
           setPasses(data.passes || []);
         }

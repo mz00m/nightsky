@@ -4,6 +4,45 @@ import { SatellitePass } from "@/lib/satellites";
 const N2YO_API_KEY = process.env.N2YO_API_KEY;
 const N2YO_BASE = "https://api.n2yo.com/rest/v1/satellite";
 
+// Simple in-memory rate limiter: max 10 requests per minute per IP
+const rateLimit = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT_WINDOW = 60_000; // 1 minute
+const RATE_LIMIT_MAX = 10;
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const entry = rateLimit.get(ip);
+
+  if (!entry || now > entry.resetAt) {
+    rateLimit.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
+    return true;
+  }
+
+  if (entry.count >= RATE_LIMIT_MAX) return false;
+
+  entry.count++;
+  return true;
+}
+
+// Periodically clean up stale entries
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of rateLimit) {
+    if (now > entry.resetAt) rateLimit.delete(ip);
+  }
+}, RATE_LIMIT_WINDOW);
+
+function validateCoords(
+  lat: number,
+  lng: number,
+  alt: number
+): string | null {
+  if (isNaN(lat) || lat < -90 || lat > 90) return "Invalid latitude";
+  if (isNaN(lng) || lng < -180 || lng > 180) return "Invalid longitude";
+  if (isNaN(alt) || alt < 0 || alt > 50000) return "Invalid altitude";
+  return null;
+}
+
 interface N2YOPass {
   startAz: number;
   startAzCompass: string;
@@ -56,7 +95,7 @@ async function fetchPasses(
   const url = `${N2YO_BASE}/visualpasses/${satid}/${lat}/${lng}/${alt}/${days}/300/&apiKey=${N2YO_API_KEY}`;
 
   try {
-    const res = await fetch(url, { next: { revalidate: 900 } }); // cache 15 min
+    const res = await fetch(url, { next: { revalidate: 900 } });
     if (!res.ok) return [];
     const data: N2YOPassResponse = await res.json();
     if (!data.passes) return [];
@@ -94,11 +133,11 @@ async function fetchAbove(
 ): Promise<N2YOAbove[]> {
   if (!N2YO_API_KEY) return [];
 
-  const searchRadius = 70; // degrees
+  const searchRadius = 70;
   const url = `${N2YO_BASE}/above/${lat}/${lng}/${alt}/${searchRadius}/${categoryId}/&apiKey=${N2YO_API_KEY}`;
 
   try {
-    const res = await fetch(url, { next: { revalidate: 60 } }); // cache 1 min
+    const res = await fetch(url, { next: { revalidate: 60 } });
     if (!res.ok) return [];
     const data: N2YOAboveResponse = await res.json();
     return data.above || [];
@@ -108,25 +147,53 @@ async function fetchAbove(
 }
 
 export async function GET(request: NextRequest) {
+  // Rate limiting
+  const ip =
+    request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+    request.headers.get("x-real-ip") ||
+    "unknown";
+
+  if (!checkRateLimit(ip)) {
+    return NextResponse.json(
+      { error: "Too many requests. Try again in a minute.", passes: [], above: [] },
+      { status: 429 }
+    );
+  }
+
   const searchParams = request.nextUrl.searchParams;
-  const lat = parseFloat(searchParams.get("lat") || "0");
-  const lng = parseFloat(searchParams.get("lng") || "0");
+  const lat = parseFloat(searchParams.get("lat") || "");
+  const lng = parseFloat(searchParams.get("lng") || "");
   const alt = parseFloat(searchParams.get("alt") || "0");
-  const mode = searchParams.get("mode") || "passes"; // "passes" or "above"
+  const mode = searchParams.get("mode") || "passes";
+
+  // Input validation
+  const validationError = validateCoords(lat, lng, alt);
+  if (validationError) {
+    return NextResponse.json(
+      { error: validationError, passes: [], above: [] },
+      { status: 400 }
+    );
+  }
+
+  if (mode !== "passes" && mode !== "above") {
+    return NextResponse.json(
+      { error: "Invalid mode", passes: [], above: [] },
+      { status: 400 }
+    );
+  }
 
   if (!N2YO_API_KEY) {
     return NextResponse.json(
-      { error: "N2YO_API_KEY not configured", passes: [], above: [] },
+      { error: "Satellite tracking is not available", passes: [], above: [] },
       { status: 200 }
     );
   }
 
   if (mode === "above") {
-    // What's overhead right now
     const [brightSats, rocketBodies, debris] = await Promise.all([
-      fetchAbove(lat, lng, alt, 1), // brightest
-      fetchAbove(lat, lng, alt, 8), // rocket bodies
-      fetchAbove(lat, lng, alt, 50), // debris (if trackable)
+      fetchAbove(lat, lng, alt, 1),
+      fetchAbove(lat, lng, alt, 8),
+      fetchAbove(lat, lng, alt, 50),
     ]);
 
     return NextResponse.json({
@@ -139,20 +206,16 @@ export async function GET(request: NextRequest) {
     });
   }
 
-  // Upcoming visual passes for key objects
   const days = 5;
   const [issPasses, tiangongPasses] = await Promise.all([
     fetchPasses(25544, lat, lng, alt, days, "iss"),
     fetchPasses(48274, lat, lng, alt, days, "satellite"),
   ]);
 
-  // Also get a few bright Starlink passes by querying above endpoint
-  // and then getting passes for the closest ones
   let starlinkPasses: SatellitePass[] = [];
   try {
     const starlinkAbove = await fetchAbove(lat, lng, alt, 52);
     if (starlinkAbove.length > 0) {
-      // Get passes for up to 3 nearby Starlink sats
       const starlinkIds = starlinkAbove.slice(0, 3).map((s) => s.satid);
       const starlinkResults = await Promise.all(
         starlinkIds.map((id) => fetchPasses(id, lat, lng, alt, 2, "starlink"))
@@ -160,10 +223,9 @@ export async function GET(request: NextRequest) {
       starlinkPasses = starlinkResults.flat();
     }
   } catch {
-    // Starlink data is bonus, not critical
+    // Starlink data is bonus
   }
 
-  // Bright rocket bodies
   let rocketPasses: SatellitePass[] = [];
   try {
     const rocketAbove = await fetchAbove(lat, lng, alt, 8);
